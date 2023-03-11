@@ -1,14 +1,18 @@
 # XiaoXuan Allocator
 
-一个高效的 _heap_ 动态分配器，主要为 [XiaoXuan Lang](https://www.github.com/hemashushu/xiaoxuan-lang) 而设计。也可用于一般的应用程序或者内核的 _heap_ 动态分配。
+一个高效的动态 _heap_ 分配器，主要为 [XiaoXuan Lang](https://www.github.com/hemashushu/xiaoxuan-lang) 而设计。也可用于一般的应用程序或者内核的动态 _heap_ 分配。
 
 特点：
 
-- 为 _XiaoXuan Lang_ 的运行环境 [XiaoXuan VM](https://www.github.com/hemashushu/xiaoxuan-vm) 以及 [XiaoXuan Native](https://www.github.com/hemashushu/xiaoxuan-native) 优化；
+- 为 _XiaoXuan Lang_ 的语言特点而优化；
 - 分配和释放内存的速度快；
 - 有效降低内部碎片和外部碎片的产生。
 
-<!-- @import "[TOC]" {cmd="toc" depthFrom=2 depthTo=5 orderedList=false} -->
+- - -
+
+目录
+
+<!-- @import "[TOC]" {cmd="toc" depthFrom=2 depthTo=4 orderedList=false} -->
 
 <!-- code_chunk_output -->
 
@@ -26,16 +30,11 @@
   - [_Heap_ 的结构](#-_heap_-的结构)
     - [_Header_ 的结构](#-_header_-的结构)
     - [_Data area_ 的结构](#-_data-area_-的结构)
-      - [_Free block_ 的结构](#-_free-block_-的结构)
-      - [_Allocated block_ 的结构](#-_allocated-block_-的结构)
-      - [标记位](#-标记位)
   - [_可变大小分配器_ 的工作过程](#-_可变大小分配器_-的工作过程)
     - [_Free block_ 的插入及合并](#-_free-block_-的插入及合并)
   - [固定大小内存分配器](#-固定大小内存分配器)
     - [_索引页_ 的结构](#-_索引页_-的结构)
     - [_数据页_ 的结构](#-_数据页_-的结构)
-      - [_Free item_ 的结构](#-_free-item_-的结构)
-      - [_Allocated item_ 的结构](#-_allocated-item_-的结构)
     - [_索引页_ 和 _数据页_ 示例](#-_索引页_-和-_数据页_-示例)
   - [_固定大小分配器_ 的工作过程](#-_固定大小分配器_-的工作过程)
     - [_数据页_ 的创建过程](#-_数据页_-的创建过程)
@@ -47,13 +46,13 @@
 
 ## XiaoXuan Lang 的内存管理方式
 
-_XiaoXuan Lang_ 运行环境的内存管理方式是 _无 GC 自动内存管理_ 型的，因为 _XiaoXuan Lang_ 的数据不可变（immutable），对于诸如结构体等数据对象，只需简单标记数据对象的引用数量即可准确且及时释放。因为在 _XiaoXuan Lang_ 里的数据，除了基本的数据类型（诸如 int, float）和元组（tuple）数据之外，其余的都是结构体，所以下面主要考察结构体在内存中的管理方式。
+_XiaoXuan Lang_ 运行环境的内存管理方式是 _无 GC 自动内存管理_ 型的，因为 _XiaoXuan Lang_ 的数据不可变（immutable），对于诸如结构体等数据对象，只需简单标记数据对象的引用数量即可准确且及时释放，而无需 GC 管理器。_XiaoXuan Lang_ 的数据除了基本的数据类型（诸如 int, float）和元组（tuple）之外，其余的都是结构体，所以下面主要考察结构体在内存中的管理方式。
 
 ### 在 _heap_ 上创建结构体对象
 
-_XiaoXuan Lang_ 的所有结构体对象都是在 _heap_ 上创建，这点跟诸如 C 语言的传统编译型语言不同，在 C 语言里，局部的结构体对象是在 _stack_ 上创建的。
+_XiaoXuan Lang_ 的所有结构体对象都是在 _heap_ 上创建，这点跟诸如 C 语言不同，在 C 语言里，局部的结构体对象是在 _stack_ 上创建的。
 
-下面对比两个 C 语言和 _XiaoXuan Lang_ 的小程序：
+例如：
 
 ```c
 // file "main.c"
@@ -85,14 +84,19 @@ $ objdump -d main.out
 函数 `main` 的部分汇编/指令如下：
 
 ```s
+00000000000011c0 <main>:
+    11c0:       55                      push   %rbp
+    11c1:       48 89 e5                mov    %rsp,%rbp
     113d:       48 83 ec 10             sub    $0x10,%rsp
     1141:       c7 45 f8 11 00 00 00    movl   $0x11,-0x8(%rbp)
     1148:       c7 45 fc 22 00 00 00    movl   $0x22,-0x4(%rbp)
 ```
 
-上面的指令显示：先在 _stack_ 上开辟长度为 `0x10` 的区间，然后将整数 `0x11` 存储到前 4 个字节处，将整数 `0x22` 存储到后 4 个字节处。可见结构体对象 `u1` 是直接在 _stack_ 上创建的。
+上面的指令显示：程序在当前栈帧开始位置（往低地址方向）依次存储进 32 bits 的 0x22 和 0x11。可见结构体对象 `u1` 是直接在 _stack_ 上创建的。
 
-下面是 _XiaoXuan Lang_ 等效的代码：
+> 如果想简单地了解 x86 的 GNU assembly 语法，可以参考这篇 [x86 Assembly/GNU assembly syntax](https://en.wikibooks.org/wiki/X86_Assembly/GNU_assembly_syntax)，或者 [x86 Assembly Guide](http://flint.cs.yale.edu/cs421/papers/x86-asm/asm.html)。如果想了解在 C 语言代码里嵌入汇编，可以参考 [6.47 How to Use Inline Assembly Language in C Code](https://gcc.gnu.org/onlinedocs/gcc/Using-Assembly-Language-with-C.html)
+
+下面是上面程序的等效 _XiaoXuan Lang_ 代码：
 
 ```js
 // file: "main.an"
@@ -131,7 +135,9 @@ $ anlc --ir -o main.anir main.an
 )
 ```
 
-_XiaoXuan IR_ 当中的 `struct` 函数用于在 _heap_ 创建指定成员总大小的内存段落。可见即使是局部结构体对象，_XiaoXuan Lang_ 也是在 _heap_ 而不是 _stack_ 上创建。
+_XiaoXuan IR_ 当中的 `struct` 函数用于在 _heap_ 创建指定成员总大小的内存段落。可见对于局部结构体对象，_XiaoXuan Lang_ 是在 _heap_ 而不是 _stack_ 上创建的。
+
+> 如果想了解 _XiaoXuan IR_ 的语法，可以参阅 [XiaoXuan IR Spec](https://www.github.com/hemashushu/xiaoxuan-ir)
 
 ### 按指针传递结构体对象
 
@@ -202,9 +208,9 @@ int main(void) {
 
 ### 优缺点
 
-_XiaoXuan Lang_ 的所有结构体对象都在 _heap_ 上创建的策略，能简化语言的同时，也能简化编译器以及内存管理设计和实现。比如当需要创建一个非局部的结构体对象时（即离开结构体对象的声明语句作用范围之后仍需要访问的对象），C 语言需要显式地使用函数 `malloc` 分配内存，而局部使用时却可以直接声明及初始化。在语言层面会出现两种不同且不可互换的结构体对象实例化的方式。
+_XiaoXuan Lang_ 的所有结构体对象都在 _heap_ 上创建的策略，能简化语言的同时也能简化编译器以及内存管理设计和实现。比如当需要创建一个非局部的结构体对象（即离开结构体对象的声明语句作用范围之后仍需要访问的对象），C 语言需要显式地使用函数 `malloc` 分配内存，而局部变量则直接声明及初始化，在语言层面会出现两种不同且不可替换的结构体对象实例化的方式。
 
-而这种策略的缺点是，相对在 _stack_ 上创建结构体对象，在 _heap_ 上创建需要耗费更多时间。_XiaoXuan Lang_ 使用两个方法来减少这种策略所带来的时间损耗：其一是同时提供 _元组_（_tuple_）数据类型，_元组_ 是值类型的数据，在某些需要创建简单的（比如只包含两个基本数据类型成员的）局部数据时，可以使用 _元组_ 代替结构体；其二是针对 _XiaoXuan Lang_ 语言特点专门设计一个动态 _heap_ 分配器，也就是本项目 _XiaoXuan Allocator_。
+所有结构体对象都在 _heap_ 上创建的缺点是，相对在 _stack_ 上创建结构体对象，在 _heap_ 上创建需要耗费更多时间。_XiaoXuan Lang_ 使用两个方法来减少这种策略所带来的时间损耗：其一是在语言层提供了 _元组_（_tuple_）数据类型，_元组_ 是值类型的数据，在某些需要创建简单的（比如只包含两个基本数据类型成员的）局部数据时，可以使用 _元组_ 代替结构体；其二是针对 _XiaoXuan Lang_ 语言特点专门设计一个动态 _heap_ 分配器，也就是本项目 _XiaoXuan Allocator_。
 
 ## 编译和测试
 
@@ -255,10 +261,10 @@ _heap_ 由一个 _header_ 和一个 _数据区域_ 组成：
 ```
 
 - `magic number`：[u8; 8]，用于表示 _XiaoYu Allocator_ 的幻数，值为 HEX `78 79 61 6c 6c 6f 63 01`，对应字符串 `xyalloc`，最后一个字节 `0x01` 表示版本号。`magic number` 用于标识 _heap_ 是否已经初始化；
-- `data area pos`：uint32，_data area_ 的开始地址；
-- `index page pos`：uint32，_index page_ 的开始地址；
-- `first free block pos`：uint32，第一个 _free block_ 的地址；
-- `brk value`：uint32，`heap` 的结束位置。
+- `data area pos`：uint64，_data area_ 的开始地址；
+- `index page pos`：uint64，_index page_ 的开始地址；
+- `first free block pos`：uint64，第一个 _free block_ 的地址；
+- `brk value`：uint64，`heap` 的结束位置。
 
 #### _Data area_ 的结构
 
@@ -289,8 +295,8 @@ _free block linked list_ 是一个 _有序链表_，所有 _free block_ 按照�
 | block size | next block pos | free memory | previous block pos | block size |
 ```
 
-- `previous block pos` 和 `next block pos`：uint32，分别是前一个和后一个 _free block_ 的位置。
-- `block size`：uint32，是当前 _free block_ 的总长度（即 **包括** `block offset` 和 `block size` 等字段在内的长度）。
+- `previous block pos` 和 `next block pos`：uint64，分别是前一个和后一个 _free block_ 的位置。
+- `block size`：uint64，是当前 _free block_ 的总长度（即 **包括** `block offset` 和 `block size` 等字段在内的长度）。
 
 `previous block pos` 和 `next block pos` 的值在下列情况下其值为 0：
 
@@ -306,15 +312,15 @@ _free block linked list_ 是一个 _有序链表_，所有 _free block_ 按照�
 
 注意：
 
-- `data` 的长度必须是 4 的倍数。
+- `data` 的长度必须是 8 的倍数。
 - 分配内存时，分配器返回给应用程序的是 `data` 字段的开始位置（内存指针），当应用程序释放 _allocated block_ 时，（通过参数）传递给分配器的也是 `data` 字段的位置。但分配器管理内存片段时使用的是该片段的开始位置（即 `block size` 字段的位置）。
 
 ##### 标记位
 
-分配器要求内存片段的大小必须是 4 的倍数（同时也是为了实现内存的 4 bytes 对齐），所以 `block size` 和 `block size` 数值的低 2 bits 的值总是 0。分配器将这 2 bits 用作为标记位，其中最低位是 `type` flag，第 2 低位是 `status` flag，如下图所示：
+分配器要求内存片段的大小必须是 8 的倍数（同时也是为了实现内存的 8 bytes 对齐），所以 `block size` 和 `block size` 数值的低 4 bits 的值总是 0。分配器将这最低 2 bits 用作为标记位，其中最低位是 `type` flag，第 2 低位是 `status` flag，如下图所示：
 
 ```text
-|       [31:2]     | [1:1]  | [0:0] |
+|       [63:2]     | [1:1]  | [0:0] |
 | block size value | status | type  |
 ```
 
@@ -399,11 +405,13 @@ _free block linked list_ 是一个 _有序链表_，所有 _free block_ 按照�
 
 ### 固定大小内存分配器
 
-_固定大小分配器_（_fixed size allocator_）是 _XiaoYu Allocator_ 的一个子系统，它运行于 _可变大小分配器_ 的基础之上。用于快速分配具有固定大小且容量较小（小于等于 128 bytes）的内存。
+_固定大小分配器_（_fixed size allocator_）是 _XiaoYu Allocator_ 的一个子系统，它运行于 _可变大小分配器_ 的基础之上。用于快速分配具有固定大小且容量较小（小于等于 256 bytes）的内存。
 
-> 当程序请求分配或者释放一个容量大于 128 bytes 的内存片段时，则由 _可变大小分配器_ 程序管理。而小于等于 128 bytes 的内存片段则由 _固定大小分配器_ 程序管理。
+> 当程序请求分配或者释放一个容量大于 256 bytes 的内存片段时，则由 _可变大小分配器_ 程序管理。而小于等于 256 bytes 的内存片段则由 _固定大小分配器_ 程序管理。
 
-_固定大小分配器_ 将内存片段按照长度每 4 bytes 分为一 _类_（_class_），比如 `1 ~ 4 bytes`（包括 1 和 4）作为第 1 类，`5 ~ 8 bytes`（包括 5 和 8）作为第 2 类，`9 ~ 12 bytes`（包括 9 和 12）作为第 3 类，如此类推。128 bytes 以内的长度共被分为 `128 / 4 = 32` 类。
+> _XiaoYu Allocator_ 则是以 128 bytes 作为分界线。
+
+_固定大小分配器_ 将内存片段按照长度每 8 bytes 分为一 _类_（_class_），比如 `1 ~ 8 bytes`（包括 1 和 8）作为第 1 类，`9 ~ 16 bytes`（包括 9 和 16）作为第 2 类，`17 ~ 24 bytes`（包括 17 和 24）作为第 3 类，如此类推。256 bytes 以内的长度共被分为 `256 / 8 = 32` 类。
 
 固定大小分配器由 1 个 _索引页_（_index page_） 和多个 _数据页_（_data page_） 组成。_索引页_ 和 _数据页_ 均被包装在 _allocated block_ 里，如下图所示：
 
@@ -411,7 +419,7 @@ _固定大小分配器_ 将内存片段按照长度每 4 bytes 分为一 _类_�
 
 #### _索引页_ 的结构
 
-索引页包含有 32 个 uint32 整数（称为 _head item offset_），每一个整数指向一个 _free item linked list_ 的表头。
+索引页包含有 32 个 uint64 整数（称为 _head item offset_），每一个整数指向一个 _free item linked list_ 的表头。
 
 #### _数据页_ 的结构
 
@@ -433,16 +441,14 @@ _固定大小分配器_ 将内存片段按照长度每 4 bytes 分为一 _类_�
 ##### _Free item_ 的结构
 
 ```
-| next free item offset | class idxx | flags | free memory |
+| next free item offset | class idx | flags | free memory |
 ```
 
 - `next free item offset`：下一个 _free item_ 位置相对 _index page_ 的偏移值；
 - `class idx`：5 bits，当前项的 _class_ 的索引值，值的范围是从 0 到 31；
 - `flags`：2 bits，最低端位的值为 1，表示固定大小的内存片段，第 2 低端位暂时是保留的，它的值会被忽略。
 
-_XiaoYu Allocator_ 默认配置为 _小内存模式_，在此模式下 _memory item_ 以紧凑的方式排列，`next free item offset`、`class idx` 以及 `flags` 3 个字段共享一个 uint32，因为 `class idx` 和 `flags` 已占用低端的 `5 + 2 = 7` bits，所以 `next free item offset` 只能使用高端的 `32 - 7 = 25` bits。又因为内存段落以 4 bytes 对齐，所以 `next free item offset` 可以表达的最大值为 `2 ^ (25 + 2) = 128 MiB`。
-
-> 在 _小内存模式_ 下，_XiaoYu Allocator_ 最大支持 128 MiB 内存。当分配器配置为 _大内存模式_ 时，`next free item offset` 将单独占用一个 uint32，`class idx` 和 `flags` 占用另外一个 uint32，这时分配器可以管理最大 2GiB 内存。
+_memory item_ 以紧凑的方式排列，`next free item offset`、`class idx` 以及 `flags` 3 个字段共享一个 uint64，因为 `class idx` 和 `flags` 已占用低端的 `5 + 2 = 7` bits，所以 `next free item offset` 只能使用高端的 `64 - 7 = 57` bits。又因为内存段落以 8 bytes 对齐，所以 `next free item offset` 可以表达的最大值为 `2 ^ (57 + 4) = 2^61 bytes`，这是一个很大的数字。
 
 ##### _Allocated item_ 的结构
 
@@ -452,7 +458,7 @@ _XiaoYu Allocator_ 默认配置为 _小内存模式_，在此模式下 _memory i
 
 `padding` 字段实际上是 _free item_ 的 `next free item offset` 字段，因为 _内存项_ 被分配出去之后，原先 `next free item offset` 字段的值此已不再具有任何意义，该字段的值既可以清零，也可以保持不变。
 
-注意，无论是 _allocated block_ 还是 _allocated item_，分配器返回给应用程序的都是其中的 `data` 字段的位置（内存指针）。当 _allocated block_ 或者 _allocated item_ 被释放时，比如应用程序调用了函数 `void free(int addr)`，通过参数传递给分配器的其实是 `data` 字段的位置。分配器需要根据这个地址往后 4 bytes 读取一个 uint32 整数，这个整数的低端 2 bits 就是 _标记位_。通过 _标记位_ 的 `type` flag 就可以区分该内存片段是 _allocated block_ 还是 _allocated item_，知道内存片段的类型之后再由相应的分配程序来执行具体的释放过程。
+注意，无论是 _allocated block_ 还是 _allocated item_，分配器返回给应用程序的都是其中的 `data` 字段的位置（内存指针）。当 _allocated block_ 或者 _allocated item_ 被释放时，比如应用程序调用了函数 `void free(int addr)`，通过参数传递给分配器的其实是 `data` 字段的位置。分配器需要根据这个地址往后 8 bytes 读取一个 uint64 整数，这个整数的低端 4 bits 就是 _标记位_。通过 _标记位_ 的 `type` flag 就可以区分该内存片段是 _allocated block_ 还是 _allocated item_，知道内存片段的类型之后再由相应的分配程序来执行具体的释放过程。
 
 #### _索引页_ 和 _数据页_ 示例
 
@@ -462,7 +468,7 @@ _XiaoYu Allocator_ 默认配置为 _小内存模式_，在此模式下 _memory i
 
 当应用程序请求分配一个固定大小的内存片段时：
 
-1. 根据请求的内存片段的大小计算 _class idx_，公式是 `(n - 1) / 4`，比如 8 bytes 的 `class idx` 是 `(8 - 1) / 4 = 1`；
+1. 根据请求的内存片段的大小计算 _class idx_，公式是 `truncate((n - 1) / 8)`，比如 16 bytes 的 `class idx` 是 `truncate((16 - 1) / 8) = 1`；
 
 2. 在 _索引页_ 找到相应索引值的 `head item offset`，如果 `head item offset` 的值为 0，说明该 _class_ 对应的 _数据页_ 尚未创建。此时 _固定大小分配器_ 会先创建相应的 _数据页_ 并更新 `head item offset` 的值。
 
@@ -490,11 +496,9 @@ _固定大小分配器_ 比起 _可变大小分配器_ 节省了分割与合并�
 
 3. 如果新建的 _数据页_ 不是指定 _class_ 的第一个数据页，则更新该 _class_ 的 _free item linked list_ 的最后一个 _free item_ 的 `next free item offset` 字段，让它值为新 _数据页_ 第一个 `free item` 的位置的偏移值。
 
-一个 _数据页_ 必须 **至少** 包含两个 _item_。比如长度为 128 bytes 的 _class_ 的 _item_，因为至少需要包含两项，所以需要申请长度为 `(128 + 8) * 2 = 272` bytes 的 _allocated block_。
+一个 _数据页_ 必须 **至少** 包含两个 _item_。比如长度为 256 bytes 的 _class_ 的 _item_，因为至少需要包含两项，所以需要申请长度为 `(256 + 8) * 2 = 528` bytes 的 _allocated block_。
 
-如果 _XiaoYu Allocator_ 应用在 MCU 环境里，因为 MCU 的内存非常有限，可以配置 _数据页_ 内部的最大 _item_ 数量，比如限制在 4 项。
-
-如果 _XiaoYu Allocator_ 应用在内存资源较为充裕的 MPU 环境，则在创建 _数据页_ 时可以申请一个长度刚好大于 128 bytes 的 _allocated block_。比如长度为 8 bytes 的 _class_ 的 _item_ 长度为 `8 + 4 = 12 bytes`（其中 4 bytes 是 _item_ 的 header 的长度），该 _class_ 的数据页的长度应该为 132 bytes。其计算公式是：`(floor(128 / 12) + 1) * 12 = 11 * 12 = 132 bytes`。
+如果 _XiaoYu Allocator_ 运行在内存比较充裕的环境，最低 _item_ 数量可以配置一个比较大的数字，比如要求至少 16 项。同时要求在创建 _数据页_ 时最小长度应该大于 4096 bytes。比如长度为 16 bytes 的 _class_ 的 _item_ 长度为 `16 + 8 = 24 bytes`（其中 8 bytes 是 _item_ 的 header 的长度），该 _class_ 的数据页的长度应该为 4104 bytes。其计算公式是：`(floor(4096 / 24) + 1) * 24 = 171 * 24 = 4104 bytes`。
 
 ## 多核环境
 
@@ -502,9 +506,7 @@ TODO::
 
 ## 与其它内存分配器的比较
 
-目前有比较多应用广泛且成熟的内存分配器，比如集成到 glibc 的 `ptmalloc2`，以及 `jemalloc`、`TCMalloc`、`Hoard` 等等，显然内存分配是一项跟实际应用密切相关的工作，其中存在着几个相互矛盾的需求，每一款分配器都在各个方面进行平衡和取舍，所以并不存在一个在各种场合都完胜的分配器。
-
-_XiaoXuan Allocator_ 的主要实现方法也是来自于上面这些分配器，只是针对 _XiaoXuan Lang_ 程序的运行特点而进行了权衡和优化。另外，跟其它以 _XiaoXuan_ 命名的项目一样，我希望用 Rust 从零开始实现这些基本的组件，于是就有了当前这个项目。
+目前已存在比较成熟且被广泛应用的内存分配器，比如集成到 glibc 的 `ptmalloc2`，以及 `jemalloc`、`TCMalloc`、`Hoard` 等等，显然内存分配是一项跟实际应用场景密切相关的工作，其中存在着几个相互矛盾的需求，分配器需要针对应用场景在各个方面进行平衡和取舍。_XiaoXuan Allocator_ 的主要实现方法也是受到主流分配器所启发，不过针对 _XiaoXuan Lang_ 程序的运行特点而进行了改进和优化。另外，跟其它以 _XiaoXuan_ 命名的项目一样，我希望用新的语言工具从零开始实现这些基本的组件（_XiaoXuan Script_ interpreter 版本的分配器使用 Rust 实现，_XiaoXuan VM_ 和 _XiaoXuan Native_ 则使用 _XiaoXuan IR_ 直接实现），于是就有了当前这个项目。
 
 另外，[XiaoYu OS](https://www.github.com/hemashushu/xiaoyu-os) 内核采用的动态内存分配器 [XiaoYu Allocator](https://www.github.com/hemashushu/xiaoyu-allocator) 是当前这个分配器的 32 位版本，主要用于诸如 MCU 等内存资源非常有限的设备。
 
@@ -516,8 +518,6 @@ _XiaoXuan Allocator_ 的主要实现方法也是来自于上面这些分配器�
 - [TCMalloc](https://goog-perftools.sourceforge.net/doc/tcmalloc.html)
 - [Hoard](https://people.cs.umass.edu/~emery/pubs/berger-asplos2000.pdf)
 - [nedmalloc](https://www.nedprod.com/programs/portable/nedmalloc/)
-
-
 
 ## License
 
